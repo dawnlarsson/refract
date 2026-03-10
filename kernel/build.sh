@@ -65,6 +65,45 @@ init)
 	git -C "$tree" init -q
 	git -C "$tree" add -A
 	git -C "$tree" -c user.name=kernel-bootstrap -c user.email=kernel-bootstrap@local commit -q -m "linux $v"
+	# drop: remove files and their Makefile obj references
+	if [ -f "$dir/drop" ]; then
+		dropped=0
+		while read -r line; do
+			case "$line" in \#*|"") continue ;; esac
+			f=${line%% *}
+			[ -f "$tree/$f" ] || { printf 'build.sh: drop: not found %s\n' "$f" >&2; continue; }
+			obj=$(basename "$f" .c).o
+			makefile="$tree/$(dirname "$f")/Makefile"
+			rm "$tree/$f"
+			if [ -f "$makefile" ]; then
+				sed -i "/$obj/d" "$makefile"
+			fi
+			dropped=$((dropped + 1))
+		done < "$dir/drop"
+		if [ "$dropped" -gt 0 ]; then
+			git -C "$tree" add -A
+			git -C "$tree" -c user.name=kernel-bootstrap -c user.email=kernel-bootstrap@local \
+				commit -q -m "refract: drop $dropped file(s)"
+			printf 'build.sh: dropped %s file(s)\n' "$dropped"
+		fi
+	fi
+	# overlay: replace kernel files with prism-enhanced versions from src/
+	if [ -d "$dir/src" ]; then
+		(cd "$dir/src" && find . -type f) | while read -r f; do
+			f=${f#./}
+			mkdir -p "$tree/$(dirname "$f")"
+			cp "$dir/src/$f" "$tree/$f"
+		done
+		changed=$(git -C "$tree" diff --name-only | wc -l)
+		new=$(git -C "$tree" ls-files --others --exclude-standard | wc -l)
+		total=$((changed + new))
+		if [ "$total" -gt 0 ]; then
+			git -C "$tree" add -A
+			git -C "$tree" -c user.name=kernel-bootstrap -c user.email=kernel-bootstrap@local \
+				commit -q -m "refract: overlay $total file(s) from src/"
+			printf 'build.sh: overlaid %s file(s) from src/\n' "$total"
+		fi
+	fi
 	printf 'build.sh: ready at %s\n' "$tree"
 	;;
 

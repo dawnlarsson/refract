@@ -1,0 +1,10 @@
+# kernel/drop — files to remove from the kernel tree
+# each line: path/to/file.c
+# the build script removes the file and its .o from the nearest Makefile
+
+# legacy ramdisk loader (floppy multi-disk support, 1996 initrd protocol)
+init/do_mounts_rd.c
+init/do_mounts_initrd.c
+
+# full initramfs unpacker (we don't use external initrd)
+init/initramfs.c
