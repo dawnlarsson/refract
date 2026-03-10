@@ -7,7 +7,7 @@ cache=$dir/cache
 gnupg=$cache/gnupg
 tree=$dir/linux
 config=$dir/base.config
-default_flags=''
+default_flags='-fno-safety -fno-zeroinit -fno-unwind-tables -fno-asynchronous-unwind-tables'
 
 die() { printf 'build.sh: %s\n' "$*" >&2; exit 1; }
 
@@ -54,6 +54,13 @@ init)
 	rm -rf "$tree"
 	tar -C "$dir" -xf "$tarball"
 	mv "$dir/linux-$v" "$tree"
+	if [ -d "$dir/patches" ]; then
+		for p in "$dir/patches"/*.sh; do
+			[ -f "$p" ] || continue
+			printf 'build.sh: applying %s\n' "$(basename "$p")"
+			(cd "$tree" && sh "$p")
+		done
+	fi
 	printf '%s\n' "$v" > "$tree/.kernel-version"
 	git -C "$tree" init -q
 	git -C "$tree" add -A
@@ -66,6 +73,7 @@ build)
 	[ -f "$config" ]    || die "missing $config"
 	arch=${ARCH:-$(uname -m)}
 	jobs=${JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)}
+	__cc=${CC:-prism}
 	__kcflags=${KCFLAGS:-$default_flags}
 	case "$arch" in
 		x86_64|amd64)  arch=x86_64; target=bzImage; image=arch/x86/boot/bzImage ;;
@@ -76,18 +84,33 @@ build)
 	esac
 	git -C "$tree" reset --hard HEAD >/dev/null
 	git -C "$tree" clean -fdx >/dev/null
-	make -C "$tree" ARCH="$arch" allnoconfig KCONFIG_ALLCONFIG="$config"
-	make -C "$tree" ARCH="$arch" KCFLAGS="$__kcflags" -j"$jobs" "$target"
+	make -C "$tree" CC="$__cc" ARCH="$arch" allnoconfig KCONFIG_ALLCONFIG="$config"
+	make -C "$tree" CC="$__cc" ARCH="$arch" KCFLAGS="$__kcflags" -j"$jobs" "$target"
 	cp "$tree/$image" "$dir/kernel"
 	size=$(wc -c < "$dir/kernel")
 	printf '\nkernel ready: %s/kernel (%.2f MB)\n\n' "$dir" "$(echo "$size / 1048576" | bc -l)"
 	;;
 
+run)
+	[ -d "$tree/.git" ] || die "run init first"
+	if [ ! -f "$dir/kernel" ] || [ "$config" -nt "$dir/kernel" ] || \
+	   [ -n "$(git -C "$tree" diff --name-only HEAD 2>/dev/null)" ]; then
+		"$0" build
+	fi
+	printf 'build.sh: starting qemu\n'
+	qemu-system-x86_64 \
+		-kernel "$dir/kernel" \
+		-append "console=tty0 console=ttyS0 earlyprintk=serial" \
+		-serial mon:stdio \
+		-m 256 \
+		-no-reboot
+	;;
+
 -h|--help|help)
-	printf 'usage: %s [setup|init|build]\n' "$(basename "$0")"
+	printf 'usage: %s [setup|init|build|run]\n' "$(basename "$0")"
 	;;
 
 *)
-	die "usage: $(basename "$0") [setup|init|build]"
+	die "usage: $(basename "$0") [setup|init|build|run]"
 	;;
 esac
