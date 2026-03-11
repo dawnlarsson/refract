@@ -96,7 +96,7 @@ init)
 		if [ "$old_v" = "$v" ]; then
 			# check if patches, drop, or src changed since last init
 			changed=false
-			for f in "$dir/drop" "$dir/patches"/*.sh "$dir/src"/*; do
+			for f in "$dir/drop" "$dir/patches"/*.sh "$dir/src"/* "$dir/func"/*; do
 				[ -e "$f" ] || continue
 				if [ "$f" -nt "$init_stamp" ]; then
 					changed=true
@@ -162,6 +162,96 @@ init)
 			git -C "$tree" -c user.name=kernel-bootstrap -c user.email=kernel-bootstrap@local \
 				commit -q -m "refract: overlay $total file(s) from src/"
 			printf 'build.sh: overlaid %s file(s) from src/\n' "$total"
+		fi
+	fi
+	# func: per-function patches from func/
+	# directory layout: func/<kernel-path>.c/<function_name>.c
+	# each file contains the complete replacement function (signature + body)
+	if [ -d "$dir/func" ]; then
+		patched=0
+		for fpath in $(cd "$dir/func" && find . -type f -name '*.c' | sort); do
+			fpath=${fpath#./}
+			fname=$(basename "$fpath" .c)
+			target=$(dirname "$fpath")
+			[ -f "$tree/$target" ] || { die "func: target not found: $target"; }
+			replacement="$dir/func/$fpath"
+			awk -v fname="$fname" -v rfile="$replacement" '
+			function braces(s,    n, i, c) {
+				n = 0
+				for (i = 1; i <= length(s); i++) {
+					c = substr(s, i, 1)
+					if (c == "{") n++; else if (c == "}") n--
+				}
+				return n
+			}
+			BEGIN { state = 0; depth = 0; prev = ""; found = 0; sig = 0 }
+			# state 2: inside function body, counting braces
+			state == 2 {
+				depth += braces($0)
+				if (depth <= 0) {
+					state = 0; depth = 0
+					while ((getline ln < rfile) > 0) print ln
+					close(rfile); found = 1
+				}
+				next
+			}
+			# state 1: found name, looking for opening {
+			state == 1 {
+				sig++
+				if (sig > 20) {
+					printf "%s", accum; accum = ""
+					state = 0; sig = 0; print; next
+				}
+				if (index($0, "{") > 0) {
+					depth = braces($0)
+					if (depth <= 0) {
+						state = 0; depth = 0
+						while ((getline ln < rfile) > 0) print ln
+						close(rfile); found = 1
+					} else { state = 2 }
+					next
+				}
+				if ($0 ~ /;[[:space:]]*$/) {
+					printf "%s", accum; print
+					accum = ""; state = 0; sig = 0; next
+				}
+				next
+			}
+			# state 0: searching for function
+			state == 0 {
+				d = braces($0)
+				if (depth == 0 && match($0, "(^|[^_a-zA-Z0-9])" fname "\\(")) {
+					state = 1; sig = 0; accum = ""
+					if (prev != "" && prev !~ /;[[:space:]]*$/ && prev !~ /^[[:space:]]*$/ && prev !~ /^#/ && prev !~ /^[[:space:]]*\//) {
+						accum = prev "\n"
+					} else if (prev != "") { print prev }
+					prev = ""
+					if (index($0, "{") > 0) {
+						depth = braces($0)
+						if (depth <= 0) {
+							state = 0; depth = 0
+							while ((getline ln < rfile) > 0) print ln
+							close(rfile); found = 1
+						} else { state = 2 }
+					}
+					next
+				}
+				if (prev != "") print prev
+				prev = $0; depth += d; next
+			}
+			END {
+				if (prev != "" && state == 0) print prev
+				if (!found) { print "func: not found: " fname > "/dev/stderr"; exit 1 }
+			}' "$tree/$target" > "$tree/$target.func.tmp" \
+				&& mv "$tree/$target.func.tmp" "$tree/$target" \
+				|| { rm -f "$tree/$target.func.tmp"; die "func: failed to patch $fname in $target"; }
+			patched=$((patched + 1))
+		done
+		if [ "$patched" -gt 0 ]; then
+			git -C "$tree" add -Af
+			git -C "$tree" -c user.name=kernel-bootstrap -c user.email=kernel-bootstrap@local \
+				commit -q -m "refract: patch $patched function(s)"
+			printf 'build.sh: patched %s function(s)\n' "$patched"
 		fi
 	fi
 	printf 'build.sh: ready at %s\n' "$tree"
