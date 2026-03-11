@@ -13,7 +13,7 @@ default_flags='-fno-safety -fno-zeroinit -fno-unwind-tables -fno-asynchronous-un
 
 die() { printf 'build.sh: %s\n' "$*" >&2; exit 1; }
 
-if [ -z "${REFRACT_CONTAINER:-}" ]; then
+if [ -z "${REFRACT_CONTAINER:-}" ] && [ "$(uname -s)" != Linux ]; then
 	command -v docker >/dev/null 2>&1 || die "docker required (https://docs.docker.com/get-docker/)"
 
 	# start Docker Desktop on macOS if not running
