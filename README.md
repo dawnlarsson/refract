@@ -4,23 +4,30 @@ Aims to modernize parts of the Linux kernel with Prism's features, reducing bug 
 
 this is also partly a testing ground for a new Linux Distro based on Prism
 
+## Requirements
+- [Docker](https://docs.docker.com/get-docker/)
+
+The build runs entirely inside a Docker container (Alpine 3.21) which is built automatically on first run. Prism, the cross-compiler toolchain, and all kernel build dependencies are set up inside the image.
+
 ## Build
 ```sh
 sh kernel/build.sh          # does everything: setup, init, build
 sh kernel/build.sh run      # boot in QEMU
 ```
 
-`setup` downloads and GPG-verifies the latest stable kernel. `init` extracts it, applies patches, drops dead files, and overlays Prism-enhanced sources. `build` compiles with `CC=prism`.
+`setup` downloads and GPG-verifies the latest stable kernel. `init` extracts it, applies patches, drops dead files, and overlays Prism-enhanced sources. `build` compiles with `CC=prism`. Results are cached — subsequent runs skip unchanged steps.
+
+### Environment variables
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ARCH` | `aarch64` | Target architecture (`x86_64`, `arm64`, `riscv64`) |
+| `KCFLAGS` | `-fno-safety -fno-zeroinit -fno-unwind-tables -fno-asynchronous-unwind-tables` | Extra compiler flags |
+| `JOBS` | nproc | Parallel make jobs |
+
+On macOS, Docker Desktop is started automatically if not already running.
 
 ## Prism
 [Prism](https://github.com/dawnlarsson/prism) is a C transpiler that adds `defer`, `orelse`, and automatic zero-initialization to C. It compiles as a single file, has zero dependencies, and works as a drop-in `CC=prism` overlay — all GCC/Clang flags pass through automatically.
-
-This repo tracks the latest `main` branch. To install:
-```sh
-git clone https://github.com/dawnlarsson/prism
-cd prism
-cc prism.c -flto -s -O3 -o /tmp/prism && /tmp/prism install && rm /tmp/prism
-```
 
 The kernel is built with `-fno-safety -fno-zeroinit` — only `defer` and `orelse` are active. Safety checks and zero-init conflict with kernel internals (inline asm, intentional goto-over-declaration patterns, explicit initialization control).
 

@@ -3,13 +3,50 @@
 set -eu
 
 dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+root=$(dirname "$dir")
 cache=$dir/cache
 gnupg=$cache/gnupg
 tree=$dir/linux
 config=$dir/base.config
+image_name=refract/build
 default_flags='-fno-safety -fno-zeroinit -fno-unwind-tables -fno-asynchronous-unwind-tables'
 
 die() { printf 'build.sh: %s\n' "$*" >&2; exit 1; }
+
+if [ -z "${REFRACT_CONTAINER:-}" ]; then
+	command -v docker >/dev/null 2>&1 || die "docker required (https://docs.docker.com/get-docker/)"
+
+	# start Docker Desktop on macOS if not running
+	if [ "$(uname -s)" = Darwin ] && ! docker info >/dev/null 2>&1; then
+		printf 'build.sh: starting Docker Desktop\n'
+		open -a Docker
+		timeout=60
+		while ! docker info >/dev/null 2>&1; do
+			timeout=$((timeout - 1))
+			[ "$timeout" -gt 0 ] || die "Docker Desktop failed to start"
+			sleep 1
+		done
+	fi
+
+	# build image if missing
+	if ! docker image inspect "$image_name" >/dev/null 2>&1; then
+		printf 'build.sh: building docker image (one-time)\n'
+		docker build -t "$image_name" "$dir"
+	fi
+
+	exec docker run --rm \
+		-v "$root:/work" \
+		-w /work \
+		-e REFRACT_CONTAINER=1 \
+		-e "ARCH=${ARCH:-aarch64}" \
+		-e "KCFLAGS=${KCFLAGS:-$default_flags}" \
+		-e "JOBS=${JOBS:-}" \
+		"$image_name" sh kernel/build.sh "${1:-}"
+fi
+
+# ---------------------------------------------------------------------------
+# Everything below runs inside the container (or natively on Linux)
+MAKE=${MAKE:-make}
 
 case "${1:-}" in
 "") # no argument means do everything
@@ -51,6 +88,29 @@ init)
 	tarball=$cache/linux-$v.tar.xz
 	[ -f "$tarball" ] || die "run setup first"
 
+	# skip re-init if tree matches version and inputs haven't changed
+	init_stamp="$tree/.init-stamp"
+	need_init=true
+	if [ -f "$init_stamp" ] && [ -d "$tree/.git" ]; then
+		old_v=$(cat "$init_stamp" 2>/dev/null || echo "")
+		if [ "$old_v" = "$v" ]; then
+			# check if patches, drop, or src changed since last init
+			changed=false
+			for f in "$dir/drop" "$dir/patches"/*.sh "$dir/src"/*; do
+				[ -e "$f" ] || continue
+				if [ "$f" -nt "$init_stamp" ]; then
+					changed=true
+					break
+				fi
+			done
+			if [ "$changed" = false ]; then
+				need_init=false
+				printf 'build.sh: tree already initialized for %s\n' "$v"
+			fi
+		fi
+	fi
+	[ "$need_init" = true ] || { exit 0; }
+
 	rm -rf "$tree"
 	tar -C "$dir" -xf "$tarball"
 	mv "$dir/linux-$v" "$tree"
@@ -63,7 +123,7 @@ init)
 	fi
 	printf '%s\n' "$v" > "$tree/.kernel-version"
 	git -C "$tree" init -q
-	git -C "$tree" add -A
+	git -C "$tree" add -Af
 	git -C "$tree" -c user.name=kernel-bootstrap -c user.email=kernel-bootstrap@local commit -q -m "linux $v"
 	# drop: remove files and their Makefile obj references
 	if [ -f "$dir/drop" ]; then
@@ -81,7 +141,7 @@ init)
 			dropped=$((dropped + 1))
 		done < "$dir/drop"
 		if [ "$dropped" -gt 0 ]; then
-			git -C "$tree" add -A
+			git -C "$tree" add -Af
 			git -C "$tree" -c user.name=kernel-bootstrap -c user.email=kernel-bootstrap@local \
 				commit -q -m "refract: drop $dropped file(s)"
 			printf 'build.sh: dropped %s file(s)\n' "$dropped"
@@ -98,13 +158,14 @@ init)
 		new=$(git -C "$tree" ls-files --others --exclude-standard | wc -l)
 		total=$((changed + new))
 		if [ "$total" -gt 0 ]; then
-			git -C "$tree" add -A
+			git -C "$tree" add -Af
 			git -C "$tree" -c user.name=kernel-bootstrap -c user.email=kernel-bootstrap@local \
 				commit -q -m "refract: overlay $total file(s) from src/"
 			printf 'build.sh: overlaid %s file(s) from src/\n' "$total"
 		fi
 	fi
 	printf 'build.sh: ready at %s\n' "$tree"
+	printf '%s\n' "$v" > "$init_stamp"
 	;;
 
 build)
@@ -123,8 +184,8 @@ build)
 	esac
 	git -C "$tree" reset --hard HEAD >/dev/null
 	git -C "$tree" clean -fdx >/dev/null
-	make -C "$tree" CC="$__cc" ARCH="$arch" allnoconfig KCONFIG_ALLCONFIG="$config"
-	make -C "$tree" CC="$__cc" ARCH="$arch" KCFLAGS="$__kcflags" -j"$jobs" "$target"
+	"$MAKE" -C "$tree" CC="$__cc" ARCH="$arch" allnoconfig KCONFIG_ALLCONFIG="$config"
+	"$MAKE" -C "$tree" CC="$__cc" ARCH="$arch" KCFLAGS="$__kcflags" -j"$jobs" "$target"
 	cp "$tree/$image" "$dir/kernel"
 	size=$(wc -c < "$dir/kernel")
 	printf '\nkernel ready: %s/kernel (%.2f MB)\n\n' "$dir" "$(echo "$size / 1048576" | bc -l)"
